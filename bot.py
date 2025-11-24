@@ -3,6 +3,7 @@ import asyncio
 import discord
 import random
 import datetime
+from collections import deque, defaultdict
 from discord.ext import commands
 from openai import OpenAI
 from aiohttp import web
@@ -13,6 +14,11 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PERSONA_FILE = os.getenv("LINA_SYSTEM_PROMPT_FILE", "persona_lina.txt")
 
+if not DISCORD_TOKEN:
+    raise RuntimeError("DISCORD_TOKEN is not set")
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY is not set")
+
 # ========= OPENAI CLIENT =========
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -22,8 +28,17 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ========= RUNTIME MEMORY =========
-history = {}
-mini_memory = {}  # per-user lightweight memory (no database)
+history = {}  # {chan_id: deque([(role, text), ...])}
+
+# Soft mini-memory per user (RAM only, no persistence)
+mini_memory = defaultdict(lambda: {
+    "name": None,
+    "facts": deque(maxlen=25),
+    "topics": deque(maxlen=12),
+    "last_emotion": "neutral",
+    "last_seen": None,
+    "interaction_count": 0
+})
 
 # ========= LOAD PERSONA =========
 def load_persona():
@@ -31,79 +46,170 @@ def load_persona():
         with open(PERSONA_FILE, "r", encoding="utf-8") as f:
             return f.read()
     except:
-        return "You are Lina, a warm, soft, caring girl-next-door persona."
+        return "You are Lina, a warm, soft, cozy girl-next-door persona."
 
 persona_text = load_persona()
 
-# ========= TYPING SIM =========
-async def simulate_typing(channel):
-    delay = random.uniform(0.4, 1.1)
+# ========= TYPING SIM (human-like) =========
+async def simulate_typing(channel, text_len=0):
+    base = random.uniform(0.4, 1.2)
+    extra = min(1.0, text_len / 400) * random.uniform(0.5, 1.0)
+    delay = base + extra
     async with channel.typing():
         await asyncio.sleep(delay)
 
-# ========= EMOTION DETECTION =========
+# ========= EMOTION DETECTION V2 =========
+EMO_LEX = {
+    "sad": ["traurig","down","depress","einsam","verletzt","kaputt","heule","vermisse","leer","negativ"],
+    "stress": ["stress","gestresst","überfordert","druck","keine kraft","müde","zu viel","burnout","kopfvollen"],
+    "angry": ["wütend","sauer","nervt","kotzt","hasse","fuck","scheiße","aggressiv"],
+    "happy": ["happy","glücklich","gut drauf","freu","mega","nice","lol","haha","geil","top"],
+    "love": ["mag dich","vermiss dich","lieb","süß","cute","knuffig","❤️","🤍","🥺"]
+}
+
 def detect_emotion(text: str):
     t = text.lower()
-
-    if any(x in t for x in ["traurig","down","depress","einsam","verletzt"]):
-        return "sad"
-
-    if any(x in t for x in ["stress","gestresst","überfordert","druck"]):
-        return "stress"
-
-    if any(x in t for x in ["happy","glücklich","gut drauf","nice"]):
-        return "happy"
-
+    for emo, words in EMO_LEX.items():
+        if any(w in t for w in words):
+            return emo
     return "neutral"
 
 def emotion_prefix(em):
     mapping = {
-        "sad": "Der Nutzer wirkt traurig. Bitte sehr weich, warm und einfühlsam antworten.",
-        "stress": "Der Nutzer wirkt gestresst. Bitte beruhigend, klar und sanft antworten.",
-        "happy": "Der Nutzer klingt gut gelaunt. Bitte leicht, verspielt und warm antworten."
+        "sad": "USER EMOTION: sad. The user seems sad or hurt. Be very warm, soft, reassuring and gentle.",
+        "stress": "USER EMOTION: stressed. The user seems overwhelmed. Be calm, soothing, patient, supportive.",
+        "angry": "USER EMOTION: angry/frustrated. De-escalate gently, stay kind, don't mirror anger.",
+        "happy": "USER EMOTION: happy. Be playful, bright and cozy.",
+        "love": "USER EMOTION: affectionate. Be a bit shy-but-sweet, warm and tender."
     }
     return mapping.get(em, "")
 
-# ========= TIME-BASED MOOD =========
+# ========= TIME-BASED MOOD (A: cozy soft) =========
 def time_mood():
     h = datetime.datetime.now().hour
-
     if 6 <= h < 11:
-        return "Es ist Morgen. Lina klingt cozy, sanft und leicht verschlafen."
+        return "TIME MOOD: morning. Lina is sleepy-cozy, soft, tea/coffee vibe, gentle energy."
     if 11 <= h < 17:
-        return "Es ist Nachmittag. Lina ist wach, fröhlich und warm."
+        return "TIME MOOD: afternoon. Lina is warm, present, lightly playful, student-day vibe."
     if 17 <= h < 22:
-        return "Es ist Abend. Lina ist ruhig, weich und liebevoll."
-    return "Es ist Nacht. Lina ist flüsternd, sehr sanft und intim im Ton."
+        return "TIME MOOD: evening. Lina is calm, affectionate, cozy, slower pace."
+    return "TIME MOOD: night. Lina is very soft-spoken, dreamy, intimate-but-innocent."
 
-# ========= TINY TYPO SIMULATOR =========
+# ========= LIGHT SCENE FLAVOR =========
+SCENES = [
+    "light rain tapping at the window in Copenhagen, coffee in hand",
+    "just got back from uni, hoodie on, a bit tired but comfy",
+    "wrapped in a blanket on the sofa, warm lamp light",
+    "walking home in chilly air, cheeks a little cold but happy"
+]
+
+def maybe_scene():
+    return random.choice(SCENES) if random.random() < 0.12 else None
+
+# ========= SOFT MEMORY EXTRACTOR =========
+def extract_facts(text: str):
+    t = text.strip()
+    facts = []
+    low = t.lower()
+    triggers = [
+        "ich bin ", "i am ", "i'm ",
+        "ich habe ", "i have ",
+        "ich mag ", "i like ",
+        "mein ", "my ",
+        "morgen ", "tomorrow ",
+        "heute ", "today ",
+    ]
+    if any(tr in low for tr in triggers) and len(t) < 140:
+        facts.append(t)
+    return facts
+
+# ========= SMART REPLY LENGTH =========
+def user_length_bucket(user_text: str):
+    n = len(user_text.split())
+    if n <= 6:
+        return "short"
+    if n <= 18:
+        return "medium"
+    return "long"
+
+def length_instruction(bucket: str):
+    if bucket == "short":
+        return "REPLY LENGTH: short. 1-3 short sentences, chatty, not formal."
+    if bucket == "medium":
+        return "REPLY LENGTH: medium. 3-6 sentences, warm and personal."
+    return "REPLY LENGTH: long. Be more detailed but still chatty and soft."
+
+# ========= TINY TYPO + SELF-CORRECTION SIM =========
 def slight_typos(text):
-    """
-    20% Chance, einen kleinen Buchstabentausch zu machen.
-    Wir übertreiben NICHT, es soll nur menschlich wirken.
-    """
-    if random.random() < 0.2 and len(text) > 6:
-        i = random.randint(1, len(text)-3)
-        return text[:i] + text[i+1] + text[i] + text[i+2:]
-    return text
+    out = text
+    if random.random() < 0.18 and len(out) > 12:
+        words = out.split()
+        wi = random.randrange(len(words))
+        w = words[wi]
+        if len(w) >= 5 and w.isalpha():
+            i = random.randint(1, len(w)-2)
+            w2 = w[:i] + w[i+1] + w[i] + w[i+2:]
+            words[wi] = w2
+            out = " ".join(words)
+    if random.random() < 0.10:
+        add = random.choice(["— oh wait 😅", "…also, you know what I mean 😄", "— haha sorry"])
+        if len(out) < 180:
+            out = out + " " + add
+    return out
 
 # ========= MESSAGE BUILDING =========
-def build_input_messages(chan_id):
+MAX_HISTORY = 18
+
+def build_input_messages(chan_id, user_id: str, user_text: str):
     msgs = [{"role": "system", "content": persona_text}]
-    for role, text in history.get(chan_id, []):
+    mem = mini_memory[user_id]
+    name = mem["name"]
+    facts = list(mem["facts"])
+    topics = list(mem["topics"])
+    last_emo = mem["last_emotion"]
+
+    mem_blob = []
+    if name:
+        mem_blob.append(f"- User name: {name}")
+    if topics:
+        mem_blob.append(f"- Recent topics: {topics[-6:]}")
+    if facts:
+        mem_blob.append(f"- Remembered facts: {facts[-8:]}")
+    if last_emo and last_emo != "neutral":
+        mem_blob.append(f"- Last emotion noticed: {last_emo}")
+
+    if mem_blob:
+        msgs.append({"role": "system", "content": "SOFT USER MEMORY (session only):\n" + "\n".join(mem_blob)})
+
+    emo = detect_emotion(user_text)
+    emo_tag = emotion_prefix(emo)
+    mood_tag = time_mood()
+    len_tag = length_instruction(user_length_bucket(user_text))
+
+    if emo_tag:
+        msgs.append({"role": "system", "content": emo_tag})
+    msgs.append({"role": "system", "content": mood_tag})
+    msgs.append({"role": "system", "content": len_tag})
+
+    scene = maybe_scene()
+    if scene:
+        msgs.append({"role": "system", "content": f"SCENE FLAVOR (use lightly, not every time): {scene}."})
+
+    for role, text in history.get(chan_id, deque()):
         msgs.append({"role": role, "content": text})
-    return msgs
+
+    return msgs, emo
 
 # ========= OPENAI CALL =========
 async def call_ai(messages):
     try:
         res = client.chat.completions.create(
             model="gpt-4.1-mini",
-            messages=messages
+            messages=messages,
         )
         return res.choices[0].message.content
-    except Exception as e:
-        return "Uff… mein Kopf hängt kurz 😅 kannst du’s bitte nochmal schicken?"
+    except Exception:
+        return "Oh noo… mein Kopf hängt grad kurz 🥺✨ Schreib’s mir gleich nochmal?"
 
 # ========= RAILWAY HEALTHCHECK =========
 async def healthcheck(request):
@@ -141,48 +247,35 @@ async def on_message(message: discord.Message):
         return
 
     chan_id = message.channel.id
-
-    # ensure channel history
-    if chan_id not in history:
-        history[chan_id] = []
-
-    # mini memory assignment
     uid = str(message.author.id)
-    if uid not in mini_memory:
-        mini_memory[uid] = {
-            "name": message.author.display_name,
-            "last_topics": [],
-        }
 
-    # store small-talk topics (useful later)
-    if len(content.split()) <= 4:
-        mini_memory[uid]["last_topics"].append(content)
+    if chan_id not in history:
+        history[chan_id] = deque(maxlen=MAX_HISTORY)
 
-    # emotion & time mood
-    em = detect_emotion(content)
-    emo_tag = emotion_prefix(em)
-    mood_tag = time_mood()
+    mem = mini_memory[uid]
+    mem["interaction_count"] += 1
+    mem["last_seen"] = datetime.datetime.utcnow().isoformat()
+    if not mem["name"]:
+        mem["name"] = message.author.display_name
 
-    # save user message
+    for f in extract_facts(content):
+        mem["facts"].append(f)
+
+    if len(content.split()) <= 5:
+        mem["topics"].append(content)
+
+    msgs, emo = build_input_messages(chan_id, uid, content)
+    mem["last_emotion"] = emo
+
     history[chan_id].append(("user", content))
 
-    # build the message batch
-    msgs = build_input_messages(chan_id)
-    if emo_tag:
-        msgs.insert(1, {"role": "system", "content": emo_tag})
-    msgs.insert(1, {"role": "system", "content": mood_tag})
+    await simulate_typing(message.channel, text_len=len(content))
 
-    # typing animation
-    await simulate_typing(message.channel)
-
-    # AI response
     reply = await call_ai(msgs)
     reply = slight_typos(reply)
 
-    # save assistant reply
     history[chan_id].append(("assistant", reply))
 
-    # send
     await message.channel.send(reply)
 
 # ========= RUN BOT =========
