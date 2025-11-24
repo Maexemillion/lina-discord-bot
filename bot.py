@@ -5,6 +5,62 @@ from openai import OpenAI
 import asyncio
 from aiohttp import web
 import threading
+import re
+import random
+from datetime import datetime
+
+# ========== Emotion Detection ==========
+def detect_emotion(text: str) -> str:
+    t = text.lower()
+
+    sadness = ["traurig", "down", "allein", "depressiv", "vermisst", "einsam", "heule"]
+    stress = ["stress", "überfordert", "keine zeit", "druck", "kaputt", "müde"]
+    anger = ["wtf", "hasse", "nervt", "f***", "scheiße", "aggressiv"]
+    love = ["mag dich", "vermiss dich", "cute", "süß", "lieb"]
+    happy = ["nice", "geil", "haha", "lol", "freu mich", "gut drauf"]
+
+    if any(w in t for w in sadness): return "sad"
+    if any(w in t for w in stress): return "stress"
+    if any(w in t for w in anger): return "angry"
+    if any(w in t for w in love): return "love"
+    if any(w in t for w in happy): return "happy"
+    return "neutral"
+
+
+def emotion_prefix(em: str) -> str:
+    match em:
+        case "sad":
+            return "Der Nutzer wirkt traurig. Bitte antworte warm, sanft und sehr einfühlsam. 🥺🤍"
+        case "stress":
+            return "Der Nutzer klingt gestresst. Bitte beruhigend, langsam und verständnisvoll antworten. ☁️🤍"
+        case "angry":
+            return "Der Nutzer ist wütend. Bitte ruhig, deeskalierend und freundlich antworten. ✨"
+        case "love":
+            return "Der Nutzer ist dir gegenüber sehr liebevoll. Antworte warm, süß und etwas schüchtern. 🌸"
+        case "happy":
+            return "Der Nutzer wirkt gut drauf. Antworte spielerisch, süß und energiegeladen! ✨"
+        case _:
+            return ""
+
+
+# ========== Time Mood System ==========
+def time_mood():
+    hour = datetime.utcnow().hour + 1  # convert to CET
+
+    if 5 <= hour < 11:
+        return "Es ist früher Morgen. Du bist noch leicht verschlafen, sehr cozy, warm und sanft. ☕✨"
+    if 11 <= hour < 18:
+        return "Es ist Nachmittag. Du klingst klar, warm, freundlich und wach."
+    if 18 <= hour < 23:
+        return "Es ist Abend. Du klingst ruhig, entspannt, cozy und liebevoll. 🌙✨"
+    return "Es ist nachts. Du antwortest leise, intim, sehr sanft und ruhig. 🌙🤍"
+
+
+# ========== Typing Simulation ==========
+async def simulate_typing(channel):
+    delay = random.uniform(0.5, 1.8)
+    async with channel.typing():
+        await asyncio.sleep(delay)
 
 
 # === LOAD ENV VARS ===
@@ -82,6 +138,27 @@ async def on_message(message: discord.Message):
         return
 
     chan_id = message.channel.id
+    
+    # RAM history
+    if chan_id not in history:
+        history[chan_id] = []
+
+    # Emotion detection
+    em = detect_emotion(content)
+    prefix = emotion_prefix(em)
+
+    # Time-based mood
+    mood = time_mood()
+
+    # Save user message
+    history[chan_id].append(("user", content))
+
+    # Build messages with emotional context
+    msgs = build_input_messages(chan_id)
+    if prefix:
+        msgs.insert(1, {"role": "system", "content": prefix})
+    msgs.insert(1, {"role": "system", "content": mood})
+
 
     # Initialize channel history if missing
     if chan_id not in history:
