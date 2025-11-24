@@ -4,6 +4,8 @@ from dotenv import load_dotenv
 import discord
 from discord.ext import commands
 from openai import OpenAI
+from memory_sqlite import init_db, get_user_memory, save_user_memory
+
 
 # ----------------------
 # ENV + BASIC SETUP
@@ -79,13 +81,13 @@ def should_reply(message: discord.Message):
 # ----------------------
 # BUILD AI INPUT (WITH MEMORY!)
 # ----------------------
-def build_input_messages(chan_id, author_id=None):
+async def build_input_messages(chan_id, author_id=None):
     msgs = [{"role": "system", "content": LINA_SYSTEM}]
 
-    # memory injection
     if author_id:
         uid = str(author_id)
-        user_mem = memory.get(uid, {})
+        user_mem = await get_user_memory(uid)
+
         mem_text = (
             f"USER MEMORY:\n"
             f"- Name hint: {user_mem.get('name_hint','')}\n"
@@ -129,6 +131,7 @@ def call_openai(messages):
 # ----------------------
 @bot.event
 async def on_ready():
+    await init_db()
     print(f"✅ Lina online as {bot.user}")
 
 @bot.event
@@ -152,19 +155,15 @@ async def on_message(message: discord.Message):
     chan_id = message.channel.id
 
     # ----------- MEMORY UPDATE -----------
-    if uid not in memory:
-        memory[uid] = {
-            "name_hint": message.author.display_name,
-            "fav_topics": [],
-            "notes": "",
-            "interaction_count": 0,
-            "last_interaction": "",
-        }
+    uid = str(message.author.id)
+    user_mem = await get_user_memory(uid)
 
-    memory[uid]["last_interaction"] = datetime.utcnow().isoformat()
-    memory[uid]["interaction_count"] += 1
+    # Update basics
+    user_mem["name_hint"] = message.author.display_name
+    user_mem["interaction_count"] += 1
+    user_mem["last_interaction"] = datetime.utcnow().isoformat()
 
-    # Topic recognition
+    # Topic tracking
     keywords = {
         "kopenhagen": "Kopenhagen",
         "studium": "Studium",
@@ -172,21 +171,19 @@ async def on_message(message: discord.Message):
         "dänemark": "Dänemark",
         "lernen": "Lernen",
         "fanvue": "Fanvue",
-        "wetter": "Wetter"
+        "wetter": "Wetter",
     }
 
-    for key, topic in keywords.items():
-        if key in user_text.lower() and topic not in memory[uid]["fav_topics"]:
-            memory[uid]["fav_topics"].append(topic)
+    lowered = message.content.lower()
+    for k, topic in keywords.items():
+        if k in lowered and topic not in user_mem["fav_topics"]:
+            user_mem["fav_topics"].append(topic)
 
-    save_memory()
-    # -------------------------------------
+    await save_user_memory(uid, user_mem)
 
-    add_history(chan_id, "user", message.content)
-    await lina_typing_delay(message.channel)
 
     try:
-        messages = build_input_messages(chan_id, author_id=uid)
+        messages = await build_input_messages(chan_id, author_id=uid)
         answer = await asyncio.to_thread(call_openai, messages)
 
         if not answer:
