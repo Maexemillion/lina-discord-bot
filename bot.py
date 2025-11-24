@@ -3,6 +3,9 @@ import discord
 from discord.ext import commands
 from openai import OpenAI
 import asyncio
+from aiohttp import web
+import threading
+
 
 # === LOAD ENV VARS ===
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -107,6 +110,31 @@ async def on_message(message: discord.Message):
 
     # Allow commands
     await bot.process_commands(message)
+
+# -----------------------------
+# Healthcheck Webserver (Railway)
+# -----------------------------
+async def healthcheck(request):
+    return web.Response(text="OK", status=200)
+
+def start_health_server():
+    app = web.Application()
+    app.router.add_get("/healthz", healthcheck)
+    runner = web.AppRunner(app)
+
+    async def run():
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", 8080)
+        await site.start()
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(run())
+    loop.run_forever()
+
+# Start server in background thread
+threading.Thread(target=start_health_server, daemon=True).start()
+    
 
 
 # -----------------------------
