@@ -8,110 +8,104 @@ from openai import OpenAI
 from aiohttp import web
 import threading
 
-# -----------------------------
-# Load environment variables
-# -----------------------------
+# ========= ENV LOADING =========
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PERSONA_FILE = os.getenv("LINA_SYSTEM_PROMPT_FILE", "persona_lina.txt")
 
-# -----------------------------
-# Initialize OpenAI client
-# -----------------------------
+# ========= OPENAI CLIENT =========
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# -----------------------------
-# Discord bot intents & setup
-# -----------------------------
+# ========= DISCORD SETUP =========
 intents = discord.Intents.default()
 intents.message_content = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Runtime conversation history ("RAM memory")
+# ========= RUNTIME MEMORY =========
 history = {}
+mini_memory = {}  # per-user lightweight memory (no database)
 
-# -----------------------------
-# Load Lina Persona
-# -----------------------------
+# ========= LOAD PERSONA =========
 def load_persona():
     try:
         with open(PERSONA_FILE, "r", encoding="utf-8") as f:
             return f.read()
     except:
-        return "You are Lina. A warm, caring girl-next-door."
+        return "You are Lina, a warm, soft, caring girl-next-door persona."
 
 persona_text = load_persona()
 
-# -----------------------------
-# Typing Simulation
-# -----------------------------
+# ========= TYPING SIM =========
 async def simulate_typing(channel):
-    delay = random.uniform(0.5, 1.7)
+    delay = random.uniform(0.4, 1.1)
     async with channel.typing():
         await asyncio.sleep(delay)
 
-# -----------------------------
-# Emotion Detection
-# -----------------------------
+# ========= EMOTION DETECTION =========
 def detect_emotion(text: str):
     t = text.lower()
-    if any(x in t for x in ["traurig", "down", "depress", "schlecht", "idk", "einsam"]):
+
+    if any(x in t for x in ["traurig","down","depress","einsam","verletzt"]):
         return "sad"
-    if any(x in t for x in ["stress", "gestresst", "überfordert"]):
+
+    if any(x in t for x in ["stress","gestresst","überfordert","druck"]):
         return "stress"
-    if any(x in t for x in ["glücklich", "happy", "gut drauf"]):
+
+    if any(x in t for x in ["happy","glücklich","gut drauf","nice"]):
         return "happy"
+
     return "neutral"
 
 def emotion_prefix(em):
-    if em == "sad":
-        return "Der Nutzer klingt traurig oder verletzt. Antworte weich, warm und sehr empathisch."
-    if em == "stress":
-        return "Der Nutzer klingt gestresst. Antworte beruhigend, sanft und verständnisvoll."
-    if em == "happy":
-        return "Der Nutzer klingt gut gelaunt. Antworte fröhlich, leicht und spielerisch."
-    return ""
+    mapping = {
+        "sad": "Der Nutzer wirkt traurig. Bitte sehr weich, warm und einfühlsam antworten.",
+        "stress": "Der Nutzer wirkt gestresst. Bitte beruhigend, klar und sanft antworten.",
+        "happy": "Der Nutzer klingt gut gelaunt. Bitte leicht, verspielt und warm antworten."
+    }
+    return mapping.get(em, "")
 
-# -----------------------------
-# Time-based mood
-# -----------------------------
+# ========= TIME-BASED MOOD =========
 def time_mood():
     h = datetime.datetime.now().hour
 
     if 6 <= h < 11:
-        return "Es ist Morgen. Lina ist sanft, langsam wach, cozy und liebevoll."
+        return "Es ist Morgen. Lina klingt cozy, sanft und leicht verschlafen."
     if 11 <= h < 17:
-        return "Es ist Nachmittag. Lina ist lebhaft, neugierig, warm und verspielt."
+        return "Es ist Nachmittag. Lina ist wach, fröhlich und warm."
     if 17 <= h < 22:
-        return "Es ist Abend. Lina ist ruhiger, warmherzig, anhänglich und weich."
-    return "Es ist spät in der Nacht. Lina ist flüsternd, sanft, einfühlsam und sehr cozy."
+        return "Es ist Abend. Lina ist ruhig, weich und liebevoll."
+    return "Es ist Nacht. Lina ist flüsternd, sehr sanft und intim im Ton."
 
-# -----------------------------
-# Build message list for OpenAI
-# -----------------------------
+# ========= TINY TYPO SIMULATOR =========
+def slight_typos(text):
+    """
+    20% Chance, einen kleinen Buchstabentausch zu machen.
+    Wir übertreiben NICHT, es soll nur menschlich wirken.
+    """
+    if random.random() < 0.2 and len(text) > 6:
+        i = random.randint(1, len(text)-3)
+        return text[:i] + text[i+1] + text[i] + text[i+2:]
+    return text
+
+# ========= MESSAGE BUILDING =========
 def build_input_messages(chan_id):
     msgs = [{"role": "system", "content": persona_text}]
     for role, text in history.get(chan_id, []):
         msgs.append({"role": role, "content": text})
     return msgs
 
-# -----------------------------
-# Call OpenAI
-# -----------------------------
-async def call_openai(messages):
+# ========= OPENAI CALL =========
+async def call_ai(messages):
     try:
-        response = client.chat.completions.create(
+        res = client.chat.completions.create(
             model="gpt-4.1-mini",
             messages=messages
         )
-        return response.choices[0].message.content
+        return res.choices[0].message.content
     except Exception as e:
-        return f"Ich hab gerade einen kleinen Hänger 😅✨ Kannst du’s mir nochmal schicken? ({e})"
+        return "Uff… mein Kopf hängt kurz 😅 kannst du’s bitte nochmal schicken?"
 
-# -----------------------------
-# Healthcheck Webserver (Railway)
-# -----------------------------
+# ========= RAILWAY HEALTHCHECK =========
 async def healthcheck(request):
     return web.Response(text="OK", status=200)
 
@@ -132,9 +126,7 @@ def start_health_server():
 
 threading.Thread(target=start_health_server, daemon=True).start()
 
-# -----------------------------
-# Discord Events
-# -----------------------------
+# ========= EVENTS =========
 @bot.event
 async def on_ready():
     print(f"Lina online as {bot.user}")
@@ -150,48 +142,49 @@ async def on_message(message: discord.Message):
 
     chan_id = message.channel.id
 
-    # Ensure history exists
+    # ensure channel history
     if chan_id not in history:
         history[chan_id] = []
 
-    # Emotion + mood
-    emotion = detect_emotion(content)
-    emotion_tag = emotion_prefix(emotion)
+    # mini memory assignment
+    uid = str(message.author.id)
+    if uid not in mini_memory:
+        mini_memory[uid] = {
+            "name": message.author.display_name,
+            "last_topics": [],
+        }
+
+    # store small-talk topics (useful later)
+    if len(content.split()) <= 4:
+        mini_memory[uid]["last_topics"].append(content)
+
+    # emotion & time mood
+    em = detect_emotion(content)
+    emo_tag = emotion_prefix(em)
     mood_tag = time_mood()
 
-    # Save user message ONCE
+    # save user message
     history[chan_id].append(("user", content))
 
-    # Build messages once
+    # build the message batch
     msgs = build_input_messages(chan_id)
-
-    if emotion_tag:
-        msgs.insert(1, {"role": "system", "content": emotion_tag})
-
+    if emo_tag:
+        msgs.insert(1, {"role": "system", "content": emo_tag})
     msgs.insert(1, {"role": "system", "content": mood_tag})
 
-    # Typing simulation
+    # typing animation
     await simulate_typing(message.channel)
 
-    # Get AI reply
-    reply = await call_openai(msgs)
+    # AI response
+    reply = await call_ai(msgs)
+    reply = slight_typos(reply)
 
-    # Save assistant reply
+    # save assistant reply
     history[chan_id].append(("assistant", reply))
 
-    # Send reply
-    try:
-        await message.channel.send(reply)
-    except discord.HTTPException:
-        chunks = [reply[i:i+1800] for i in range(0, len(reply), 1800)]
-        for chunk in chunks:
-            await message.channel.send(chunk)
+    # send
+    await message.channel.send(reply)
 
-    # Weiter Commands ermöglichen
-    await bot.process_commands(message)
-
-# -----------------------------
-# Run bot
-# -----------------------------
+# ========= RUN BOT =========
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
